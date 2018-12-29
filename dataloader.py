@@ -1,126 +1,73 @@
-# coding=utf-8
-from __future__ import print_function, division
-import utils
+import torch
+from torch.utils.data import Dataset, DataLoader
+from torch.utils import data
 import numpy as np
-import json
-import collections
-import pickle as pkl
 import os
-import re
+import utils
+import torchvision.transforms as transforms
 
-class DataSet(object):
-    def __init__(self, labeled=True):
-        self.images = []
+
+args = utils.get_args()
+
+class DigitsDataSet(Dataset):
+    def __init__(self, csv_file, pre_transform=None, post_transform=None, labeled=True):
+        if os.path.exists(args['paths']['processed_file'])\
+           and args['data'].getboolean('load_data_from_save'):
+            data = np.load(args['paths']['processed_file'])
+        else:
+            data = np.genfromtxt(csv_file, skip_header=1, delimiter=',', dtype=np.uint8)
+            np.save(args['paths']['processed_file'], data)
+
+        #self.images = torch.from_numpy(np.reshape(data[:,1:], (-1, 1, 28, 28))).float()
+        #reshape image from Nx(HxW) order to NxHxWxC order
+        self.images = np.reshape(data[:,1:], (-1, 28, 28, 1))
         if labeled:
-            self.labels = []
-        self.pointer = 0
-        self.amount = 0
-        self.num_batches = 0
-        self.batches = []
+            self.labels = torch.from_numpy(data[:,0]).long()
 
-class DataLoader(object):
-    def __init__(self, args, infer=False):
-        np.random.seed(args['debug'].getint('seed'))
-        self.args = args
-        self.infer = infer
-        print("Reading data files")
-        self.read_data()
-        print("Finish reading")
-        self.create_batches()
-        print("Created batches")
+        if pre_transform:
+            self.images = pre_transform(self.images)
+        self.labeled = labeled 
+        self.transform = post_transform
 
-    def read_data(self):
-        self.train_data = DataSet()
-        self.test_data = DataSet()
+    def __len__(self):
+        return len(self.images)
 
-        print('Reading training file')
-        if not os.path.exists(self.args['paths']['train_file_name']):
-            raise Exception('Training data file {} not found.'
-                            .format(self.args['paths']['train_file_name']))
-        self._read_data_set('train')
-
-        print('Reading testing file')
-        if not os.path.exists(self.args['paths']['test_file_name']):
-            raise Exception('Testing data file {} not found.'
-                            .format(self.args['paths']['test_file_name']))
-        self._read_data_set('test')
-
-        print("Begin preprocessing")
-        self.preprocess()
-        print("Finished preprocessing")
-
-        self.batch_size = self.args['train'].getint('batch_size')
-        self.train_data.amount = len(self.train_data.images)
-        self.test_data.amount = len(self.test_data.images)
-
-    def create_batches(self):
-        print('Creating training data batches')
-        self._create_data_set_batches(self.train_data)
-        print('Creating testing data batches')
-        self._create_data_set_batches(self.test_data)
-
-    def _read_data_set(self, mode):
-        #Assuming the dataset is small enough to load into RAM
-        #Use h5py/tfrecord if the dataset is larger
-        if mode == 'train':
-            data_set = self.train_data
-            data_file_name = self.args['paths']['train_file_name']
-        elif mode == 'test':
-            data_set = self.test_data
-            data_file_name = self.args['paths']['test_file_name']
+    def __getitem__(self, idx):
+        if self.labeled:
+            sample = {'image': self.images[idx], 'label': self.labels[idx]}
         else:
-            raise ValueError('Incorrect mode: %s given' % mode)
+            sample = {'image': self.images[idx]}
+        if self.transform:
+            sample['image'] = self.transform(sample['image'])
+        return sample      
 
-        data = np.genfromtxt(data_file_name, skip_header=1)
-        data_set.images = data[:,1:]
-        data_set.labels = data[:,0]
+        
+def create_dataloader():
+    transform = transforms.Compose(
+                    [transforms.ToTensor(),
+                     transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
 
 
-    def preprocess(self):
-        print('Begin preprocessing training data')
-        self._preprocess_data_set(self.train_data)
-        print('Begin reprocessing testing data')
-        self._preprocess_data_set(self.test_data)
+    #create master dataset
+    master = DigitsDataSet(csv_file=args['paths']['train_file_name'], post_transform=transform)
 
-    def _create_data_set_batches(self, data_set):
-        data_set.num_batches = data_set.amount // self.batch_size
-        assert data_set.num_batches != 0, "Not enough data. Make batch_size smaller."
-        self.shuffle_data(data_set)
-        num_of_items = data_set.num_batches*self.args['train'].getint('batch_size')
+    #split the dataset into train and test
+    n_test = int(len(master)*args['data'].getfloat('test_percentage'))
+    n_train = len(master) - n_test
+    train_dataset, test_dataset = data.random_split(master, (n_train, n_test))
 
-        def split(x):
-            return np.split(x[:num_of_items], data_set.num_batches)
-        data_set.batches = list(zip(split(data_set.images),
-                                       split(data_set.labels),
-                                       ))
-        self.reset_batch_pointer()
+    #create dataloader
+    train_dataloader = DataLoader(train_dataset,
+                                  batch_size=args['data'].getint('batch_size'),
+                                  shuffle=True,
+                                  num_workers=4,
+                                  pin_memory=True,
+                                  )
+    test_dataloader = DataLoader(test_dataset,
+                                 batch_size=args['data'].getint('batch_size'),
+                                 shuffle=True,
+                                 num_workers=4,
+                                 pin_memory=True,
+                                 )
+    return train_dataloader, test_dataloader
 
-    @staticmethod
-    def shuffle_data(data_set):
-        shuffle_key = np.arange(data_set.amount)
-        np.random.shuffle(shuffle_key)
-        data_set.images = data_set.images[shuffle_key]
-        data_set.labels = data_set.labels[shuffle_key]
-
-    def next_train_batch(self):
-        return self._next_batch('train')
-
-    def next_test_batch(self):
-        return self._next_batch('test')
-
-    def _next_batch(self, mode):
-        if mode == 'train':
-            data_set = self.train_data
-        elif mode == 'test':
-            data_set = self.test_data
-        else:
-            raise ValueError('input argument must be "train" or "test". {} given'.format(mode))
-        batch = data_set.batches[data_set.pointer]
-        data_set.pointer += 1
-        return batch, seq_length
-
-    def reset_batch_pointer(self):
-        self.train_data.pointer = 0
-
-    def reset_test_batch_pointer(self):
-        self.test_data.pointer = 0
