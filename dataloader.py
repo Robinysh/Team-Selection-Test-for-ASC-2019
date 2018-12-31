@@ -19,10 +19,12 @@ class DigitsDataSet(Dataset):
             np.save(args['paths']['processed_file'], data)
 
         #self.images = torch.from_numpy(np.reshape(data[:,1:], (-1, 1, 28, 28))).float()
-        #reshape image from Nx(HxW) order to NxHxWxC order
-        self.images = np.reshape(data[:,1:], (-1, 28, 28, 1))
         if labeled:
+            #reshape image from Nx(HxW) order to NxHxWxC order
+            self.images = np.reshape(data[:,1:], (-1, 28, 28, 1))
             self.labels = torch.from_numpy(data[:,0]).long()
+        else:
+            self.images = np.reshape(data, (-1, 28, 28, 1))
 
         if pre_transform:
             self.images = pre_transform(self.images)
@@ -44,8 +46,14 @@ class DigitsDataSet(Dataset):
         
 def create_dataloader():
     transform = transforms.Compose(
-                    [transforms.ToTensor(),
-                     transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
+                    [
+                     transforms.ToPILImage(),
+                     #transforms.RandomAffine((-15, 15), (0.1, 0.1), (0.8, 1.2), (-15, 15)),
+                     #transforms.RandomResizedCrop(28, (0.7, 1.3), (3/4,4/3)),
+                     #transforms.RandomRotation((-45, 45)),
+                     transforms.ToTensor(),
+                     transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+                    ])
 
 
     #create master dataset
@@ -71,3 +79,21 @@ def create_dataloader():
                                  )
     return train_dataloader, test_dataloader
 
+def create_infer_dataloader():
+    transform = transforms.Compose(
+                    [
+                     transforms.ToPILImage(),
+                     transforms.ToTensor(),
+                     transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+                    ])
+
+
+    master = DigitsDataSet(csv_file=args['paths']['test_file_name'], post_transform=transform, labeled=False)
+    infer_dataloader = DataLoader(master,
+                                  batch_size=args['data'].getint('batch_size'),
+                                  shuffle=False,
+                                  num_workers=4,
+                                  pin_memory=True,
+                                  )
+
+    return infer_dataloader
